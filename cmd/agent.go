@@ -10,10 +10,12 @@ import (
 	"github.com/vitodeploy/agent/pkg/config"
 	"github.com/vitodeploy/agent/pkg/cpu"
 	"github.com/vitodeploy/agent/pkg/disk"
+	"github.com/vitodeploy/agent/pkg/host"
 	"github.com/vitodeploy/agent/pkg/memory"
 )
 
 type Payload struct {
+	// --- existing, unchanged ---
 	Load        float64 `json:"load"`
 	DiskTotal   string  `json:"disk_total"`
 	DiskFree    string  `json:"disk_free"`
@@ -21,6 +23,21 @@ type Payload struct {
 	MemoryTotal string  `json:"memory_total"`
 	MemoryFree  string  `json:"memory_free"`
 	MemoryUsed  string  `json:"memory_used"`
+
+	// --- new ---
+	CPUCores          int       `json:"cpu_cores"`
+	CPUPhysicalCores  int       `json:"cpu_physical_cores"`
+	CPUUsagePercent   float64   `json:"cpu_usage_percent"`
+	CPUPerCoreUsage   []float64 `json:"cpu_per_core_usage_percent"`
+	CPUStealPercent   float64   `json:"cpu_steal_percent"`
+	MemoryUsedPercent float64   `json:"memory_used_percent"`
+	SwapTotal         string    `json:"swap_total"`
+	SwapFree          string    `json:"swap_free"`
+	SwapUsed          string    `json:"swap_used"`
+	SwapUsedPercent   float64   `json:"swap_used_percent"`
+	OOMKillCount      int64     `json:"oom_kill_count"`
+	UptimeSeconds     float64   `json:"uptime_seconds"`
+	RebootRequired    bool      `json:"reboot_required"`
 }
 
 func main() {
@@ -29,6 +46,7 @@ func main() {
 		cpuInfo := cpu.GetCPUInfo()
 		diskInfo := disk.GetDiskInfo()
 		memoryInfo := memory.GetMemoryInfo()
+		hostInfo := host.GetHostInfo()
 		payload := Payload{
 			Load:        cpuInfo.Load,
 			DiskTotal:   diskInfo.Total,
@@ -37,6 +55,20 @@ func main() {
 			MemoryTotal: memoryInfo.Total,
 			MemoryFree:  memoryInfo.Free,
 			MemoryUsed:  memoryInfo.Used,
+
+			CPUCores:          cpuInfo.LogicalCores,
+			CPUPhysicalCores:  cpuInfo.PhysicalCores,
+			CPUUsagePercent:   cpuInfo.UsagePercent,
+			CPUPerCoreUsage:   cpuInfo.PerCoreUsagePercent,
+			CPUStealPercent:   cpuInfo.StealPercent,
+			MemoryUsedPercent: memoryInfo.UsedPercent,
+			SwapTotal:         memoryInfo.SwapTotal,
+			SwapFree:          memoryInfo.SwapFree,
+			SwapUsed:          memoryInfo.SwapUsed,
+			SwapUsedPercent:   memoryInfo.SwapUsedPercent,
+			OOMKillCount:      hostInfo.OOMKillCount,
+			UptimeSeconds:     hostInfo.UptimeSeconds,
+			RebootRequired:    hostInfo.RebootRequired,
 		}
 		jsonPayload, err := json.Marshal(payload)
 		if err != nil {
