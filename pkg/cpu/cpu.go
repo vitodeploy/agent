@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +32,7 @@ func GetCPUInfo() CPUInfo {
 
 	// Read /proc/loadavg first so the legacy `load` field samples at the
 	// same instant as it did before this change.
-	load, err := loadAvarage()
+	load, err := loadAverage()
 	if err != nil {
 		fmt.Println("Error:", err)
 	}
@@ -54,13 +55,18 @@ func GetCPUInfo() CPUInfo {
 
 	info.UsagePercent, info.StealPercent = sampleDelta(overall1, overall2)
 
-	n := len(perCore1)
-	if len(perCore2) < n {
-		n = len(perCore2)
+	// Match per-core samples by parsed cpuN index (not slice position) so
+	// CPU hotplug between the two reads can't silently misalign columns.
+	ids := make([]int, 0, len(perCore1))
+	for id := range perCore1 {
+		if _, ok := perCore2[id]; ok {
+			ids = append(ids, id)
+		}
 	}
-	perCore := make([]float64, 0, n)
-	for i := 0; i < n; i++ {
-		usage, _ := sampleDelta(perCore1[i], perCore2[i])
+	sort.Ints(ids)
+	perCore := make([]float64, 0, len(ids))
+	for _, id := range ids {
+		usage, _ := sampleDelta(perCore1[id], perCore2[id])
 		perCore = append(perCore, usage)
 	}
 	info.PerCoreUsagePercent = perCore
@@ -68,48 +74,53 @@ func GetCPUInfo() CPUInfo {
 	return info
 }
 
-func loadAvarage() (float64, error) {
-	// Read the contents of /proc/loadavg
+func loadAverage() (float64, error) {
 	data, err := os.ReadFile("/proc/loadavg")
 	if err != nil {
 		return 0, err
 	}
 
-	// Parse the contents
 	loadavg := strings.Fields(string(data))
-
-	// string to float64
-	load, err := strconv.ParseFloat(loadavg[0], 64)
-	if err != nil {
-		return 0, err
+	if len(loadavg) == 0 {
+		return 0, fmt.Errorf("empty /proc/loadavg")
 	}
 
-	return load, nil
+	return strconv.ParseFloat(loadavg[0], 64)
 }
 
-func readProcStat() (cpuSample, []cpuSample, error) {
+func readProcStat() (cpuSample, map[int]cpuSample, error) {
 	data, err := os.ReadFile("/proc/stat")
 	if err != nil {
 		return cpuSample{}, nil, err
 	}
 
 	var overall cpuSample
-	perCore := make([]cpuSample, 0)
+	perCore := make(map[int]cpuSample)
 
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 || !strings.HasPrefix(fields[0], "cpu") {
+		if len(fields) < 2 {
 			continue
 		}
+		label := fields[0]
 		sample, ok := parseCPULine(fields[1:])
 		if !ok {
 			continue
 		}
-		if fields[0] == "cpu" {
+		if label == "cpu" {
 			overall = sample
-		} else {
-			perCore = append(perCore, sample)
+			continue
 		}
+		// Per-core line: must be "cpu<N>" exactly. Reject "cpufreq",
+		// "cpu_pressure", and any other future "cpu*" labels.
+		if !strings.HasPrefix(label, "cpu") {
+			continue
+		}
+		idx, err := strconv.Atoi(label[3:])
+		if err != nil {
+			continue
+		}
+		perCore[idx] = sample
 	}
 
 	return overall, perCore, nil
