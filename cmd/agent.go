@@ -15,7 +15,6 @@ import (
 )
 
 type Payload struct {
-	// --- existing, unchanged ---
 	Load        float64 `json:"load"`
 	DiskTotal   string  `json:"disk_total"`
 	DiskFree    string  `json:"disk_free"`
@@ -24,7 +23,6 @@ type Payload struct {
 	MemoryFree  string  `json:"memory_free"`
 	MemoryUsed  string  `json:"memory_used"`
 
-	// --- new ---
 	CPUCores          int       `json:"cpu_cores"`
 	CPUPhysicalCores  int       `json:"cpu_physical_cores"`
 	CPUUsagePercent   float64   `json:"cpu_usage_percent"`

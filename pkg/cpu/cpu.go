@@ -30,8 +30,6 @@ func GetCPUInfo() CPUInfo {
 		PerCoreUsagePercent: make([]float64, 0),
 	}
 
-	// Read /proc/loadavg first so the legacy `load` field samples at the
-	// same instant as it did before this change.
 	load, err := loadAverage()
 	if err != nil {
 		fmt.Println("Error:", err)
@@ -55,8 +53,6 @@ func GetCPUInfo() CPUInfo {
 
 	info.UsagePercent, info.StealPercent = sampleDelta(overall1, overall2)
 
-	// Match per-core samples by parsed cpuN index (not slice position) so
-	// CPU hotplug between the two reads can't silently misalign columns.
 	ids := make([]int, 0, len(perCore1))
 	for id := range perCore1 {
 		if _, ok := perCore2[id]; ok {
@@ -111,8 +107,6 @@ func readProcStat() (cpuSample, map[int]cpuSample, error) {
 			overall = sample
 			continue
 		}
-		// Per-core line: must be "cpu<N>" exactly. Reject "cpufreq",
-		// "cpu_pressure", and any other future "cpu*" labels.
 		if !strings.HasPrefix(label, "cpu") {
 			continue
 		}
@@ -127,9 +121,6 @@ func readProcStat() (cpuSample, map[int]cpuSample, error) {
 }
 
 func parseCPULine(values []string) (cpuSample, bool) {
-	// Fields after the cpu label: user, nice, system, idle, iowait, irq,
-	// softirq, steal, guest, guest_nice. Older kernels may omit trailing
-	// fields, so accept anything from 4 up.
 	if len(values) < 4 {
 		return cpuSample{}, false
 	}

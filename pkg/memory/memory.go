@@ -19,9 +19,6 @@ type MemoryInfo struct {
 }
 
 func GetMemoryInfo() MemoryInfo {
-	// New swap fields default to "0" so consumers calling parseInt on them
-	// always succeed, even when /proc/meminfo lacks Swap lines (some
-	// containerised kernels) or the read fails entirely.
 	memoryInfo := MemoryInfo{
 		SwapTotal: "0",
 		SwapFree:  "0",
@@ -64,9 +61,6 @@ func GetMemoryInfo() MemoryInfo {
 
 	usedMem := totalMem - availableMem
 	memoryInfo.Used = strconv.FormatInt(usedMem, 10)
-	// Only emit UsedPercent when MemAvailable was actually parsed. On
-	// kernels <3.14 the field is absent, and computing usedPct from
-	// availableMem=0 would falsely report 100% — a guaranteed page.
 	if sawAvailable && totalMem > 0 {
 		memoryInfo.UsedPercent = 100 * float64(usedMem) / float64(totalMem)
 	}
