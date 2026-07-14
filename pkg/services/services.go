@@ -15,10 +15,11 @@ import (
 // sent, or when a status is longer than maxStatusChars.
 const maxServices = 100
 const maxStatusChars = 32
-const commandTimeout = 5 * time.Second
 
-// commandContext is a variable so tests can stub out systemctl.
+// These are variables so tests can stub out systemctl and shorten the waits.
 var commandContext = exec.CommandContext
+var commandTimeout = 5 * time.Second
+var waitDelay = time.Second
 
 type ServiceStatus struct {
 	Id     int64  `json:"id"`
@@ -75,7 +76,13 @@ func isActive(units []string) ([]byte, error) {
 	defer cancel()
 
 	args := append([]string{"is-active"}, units...)
-	output, err := commandContext(ctx, "systemctl", args...).Output()
+	cmd := commandContext(ctx, "systemctl", args...)
+	// Killing systemctl on timeout only closes the pipe once every process
+	// holding it has exited, so a lingering child would otherwise block the
+	// metrics loop forever. WaitDelay bounds that wait.
+	cmd.WaitDelay = waitDelay
+
+	output, err := cmd.Output()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

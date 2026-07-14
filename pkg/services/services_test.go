@@ -7,18 +7,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/vitodeploy/agent/pkg/config"
 )
 
-// stubCommand replaces systemctl with a shell script for the duration of a test.
-func stubCommand(t *testing.T, script string) {
+// stubCommand replaces systemctl with a shell script for the duration of a
+// test. It returns a counter of how often the command was run.
+func stubCommand(t *testing.T, script string) *int {
 	t.Helper()
+	runs := 0
 	original := commandContext
 	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		runs++
 		return exec.CommandContext(ctx, "sh", "-c", script)
 	}
 	t.Cleanup(func() { commandContext = original })
+	return &runs
 }
 
 func TestGetServiceStatuses(t *testing.T) {
@@ -64,6 +70,52 @@ func TestGetServiceStatusesMissingBinary(t *testing.T) {
 	}
 }
 
+// shortenTimeouts keeps the timeout tests fast.
+func shortenTimeouts(t *testing.T) {
+	t.Helper()
+	originalTimeout, originalWaitDelay := commandTimeout, waitDelay
+	commandTimeout, waitDelay = 200*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { commandTimeout, waitDelay = originalTimeout, originalWaitDelay })
+}
+
+// A systemctl that prints a full set of statuses and then hangs is killed on the
+// deadline, which surfaces as the same *exec.ExitError an inactive unit causes.
+// Its output must be discarded rather than reported as a fresh reading.
+func TestGetServiceStatusesDiscardsOutputOnTimeout(t *testing.T) {
+	shortenTimeouts(t)
+	// exec so that the shell is replaced and nothing outlives the kill.
+	stubCommand(t, "echo active; exec sleep 30")
+
+	statuses := GetServiceStatuses([]config.ServiceConfig{{Id: 3, Unit: "nginx"}})
+
+	if statuses != nil {
+		t.Fatalf("expected nil statuses on timeout, got %#v", statuses)
+	}
+}
+
+// Killing systemctl does not close the output pipe while a child it left behind
+// still holds it, so without a WaitDelay the collection would block for as long
+// as that child lives and stall the metrics loop with it.
+func TestGetServiceStatusesReturnsWhenSystemctlLeavesAChildBehind(t *testing.T) {
+	shortenTimeouts(t)
+	// No exec, so the shell forks and `sleep` inherits the output pipe.
+	stubCommand(t, "echo active; sleep 30")
+
+	done := make(chan []ServiceStatus, 1)
+	go func() {
+		done <- GetServiceStatuses([]config.ServiceConfig{{Id: 3, Unit: "nginx"}})
+	}()
+
+	select {
+	case statuses := <-done:
+		if statuses != nil {
+			t.Errorf("expected nil statuses, got %#v", statuses)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("GetServiceStatuses blocked on a lingering child instead of giving up")
+	}
+}
+
 func TestGetServiceStatusesCountMismatch(t *testing.T) {
 	stubCommand(t, "echo active")
 
@@ -86,7 +138,7 @@ func TestGetServiceStatusesNoOutput(t *testing.T) {
 }
 
 func TestGetServiceStatusesWithoutConfiguredServices(t *testing.T) {
-	stubCommand(t, "echo active")
+	runs := stubCommand(t, "echo active")
 
 	if statuses := GetServiceStatuses(nil); statuses != nil {
 		t.Fatalf("expected nil statuses for nil config, got %#v", statuses)
@@ -94,11 +146,13 @@ func TestGetServiceStatusesWithoutConfiguredServices(t *testing.T) {
 	if statuses := GetServiceStatuses([]config.ServiceConfig{}); statuses != nil {
 		t.Fatalf("expected nil statuses for empty config, got %#v", statuses)
 	}
+	if *runs != 0 {
+		t.Errorf("expected systemctl not to be run, got %d runs", *runs)
+	}
 }
 
-// systemctl is never run when every configured entry is unusable.
 func TestGetServiceStatusesOnlyInvalidEntries(t *testing.T) {
-	stubCommand(t, "echo active; echo active")
+	runs := stubCommand(t, "echo active; echo active")
 
 	statuses := GetServiceStatuses([]config.ServiceConfig{
 		{Id: 3, Unit: ""},
@@ -107,6 +161,9 @@ func TestGetServiceStatusesOnlyInvalidEntries(t *testing.T) {
 
 	if statuses != nil {
 		t.Fatalf("expected nil statuses, got %#v", statuses)
+	}
+	if *runs != 0 {
+		t.Errorf("expected systemctl not to be run, got %d runs", *runs)
 	}
 }
 
@@ -161,7 +218,9 @@ func TestSelectEntries(t *testing.T) {
 	}
 }
 
-func TestSelectEntriesCapsAtMaxServices(t *testing.T) {
+// The server validates max:100, so this asserts the literal limit rather than
+// maxServices, which would make a wrong constant assert itself correct.
+func TestSelectEntriesCapsAt100(t *testing.T) {
 	services := make([]config.ServiceConfig, 150)
 	for i := range services {
 		services[i] = config.ServiceConfig{Id: int64(i + 1), Unit: "nginx"}
@@ -169,25 +228,43 @@ func TestSelectEntriesCapsAtMaxServices(t *testing.T) {
 
 	entries := selectEntries(services)
 
-	if len(entries) != maxServices {
-		t.Fatalf("expected %d entries, got %d", maxServices, len(entries))
+	if len(entries) != 100 {
+		t.Fatalf("expected 100 entries, got %d", len(entries))
 	}
-	if entries[0].Id != 1 || entries[maxServices-1].Id != maxServices {
-		t.Errorf("expected the first %d services, got ids %d..%d", maxServices, entries[0].Id, entries[maxServices-1].Id)
+	if entries[0].Id != 1 || entries[99].Id != 100 {
+		t.Errorf("expected the first 100 services, got ids %d..%d", entries[0].Id, entries[99].Id)
 	}
 }
 
-func TestParseStatusesTruncatesLongStatus(t *testing.T) {
-	long := strings.Repeat("a", 40)
+// The server validates max:32 characters, so this asserts the literal limit
+// rather than maxStatusChars, which would make a wrong constant assert itself
+// correct. Laravel counts characters, not bytes, hence the multi-byte case.
+func TestParseStatusesTruncatesLongStatusTo32(t *testing.T) {
 	entries := []config.ServiceConfig{{Id: 3, Unit: "nginx"}}
 
-	statuses := parseStatuses(entries, []byte(long+"\n"))
+	statuses := parseStatuses(entries, []byte(strings.Repeat("a", 40)+"\n"))
 
 	if len(statuses) != 1 {
 		t.Fatalf("expected 1 status, got %#v", statuses)
 	}
-	if statuses[0].Status != strings.Repeat("a", maxStatusChars) {
-		t.Errorf("expected status truncated to %d chars, got %q", maxStatusChars, statuses[0].Status)
+	if statuses[0].Status != strings.Repeat("a", 32) {
+		t.Errorf("expected status truncated to 32 chars, got %q", statuses[0].Status)
+	}
+}
+
+func TestParseStatusesTruncatesMultiByteStatusTo32Chars(t *testing.T) {
+	entries := []config.ServiceConfig{{Id: 3, Unit: "nginx"}}
+
+	statuses := parseStatuses(entries, []byte(strings.Repeat("é", 40)+"\n"))
+
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 status, got %#v", statuses)
+	}
+	if statuses[0].Status != strings.Repeat("é", 32) {
+		t.Errorf("expected status truncated to 32 chars, got %q", statuses[0].Status)
+	}
+	if count := utf8.RuneCountInString(statuses[0].Status); count != 32 {
+		t.Errorf("expected 32 characters, got %d", count)
 	}
 }
 
@@ -198,6 +275,15 @@ func TestParseStatusesDropsEmptyStatus(t *testing.T) {
 
 	if len(statuses) != 1 || statuses[0] != (ServiceStatus{Id: 7, Status: "active"}) {
 		t.Fatalf("expected only the php8.4-fpm status, got %#v", statuses)
+	}
+}
+
+// nil rather than an empty slice, so that the payload omits the key outright.
+func TestParseStatusesReturnsNilWhenEveryStatusIsEmpty(t *testing.T) {
+	entries := []config.ServiceConfig{{Id: 3, Unit: "nginx"}}
+
+	if statuses := parseStatuses(entries, []byte("   \n")); statuses != nil {
+		t.Fatalf("expected nil statuses, got %#v", statuses)
 	}
 }
 
