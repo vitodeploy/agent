@@ -12,6 +12,7 @@ import (
 	"github.com/vitodeploy/agent/pkg/disk"
 	"github.com/vitodeploy/agent/pkg/host"
 	"github.com/vitodeploy/agent/pkg/memory"
+	"github.com/vitodeploy/agent/pkg/services"
 )
 
 type Payload struct {
@@ -36,6 +37,10 @@ type Payload struct {
 	OOMKillCount      int64     `json:"oom_kill_count"`
 	UptimeSeconds     float64   `json:"uptime_seconds"`
 	RebootRequired    bool      `json:"reboot_required"`
+
+	// Services is omitted entirely when no service statuses are available, which
+	// older Vito versions expect.
+	Services []services.ServiceStatus `json:"services,omitempty"`
 }
 
 func main() {
@@ -45,6 +50,7 @@ func main() {
 		diskInfo := disk.GetDiskInfo()
 		memoryInfo := memory.GetMemoryInfo()
 		hostInfo := host.GetHostInfo()
+		serviceStatuses := services.GetServiceStatuses(cfg.Services)
 		payload := Payload{
 			Load:        cpuInfo.Load,
 			DiskTotal:   diskInfo.Total,
@@ -67,6 +73,8 @@ func main() {
 			OOMKillCount:      hostInfo.OOMKillCount,
 			UptimeSeconds:     hostInfo.UptimeSeconds,
 			RebootRequired:    hostInfo.RebootRequired,
+
+			Services: serviceStatuses,
 		}
 		jsonPayload, err := json.Marshal(payload)
 		if err != nil {
