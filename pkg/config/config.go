@@ -9,9 +9,17 @@ import (
 const configDir = "/etc/vito-agent"
 const configFile = "config.json"
 
+type ServiceConfig struct {
+	Id   int64  `json:"id"`
+	Unit string `json:"unit"`
+}
+
 type Config struct {
 	Url    string `json:"url"`
 	Secret string `json:"secret"`
+	// Services is optional and is absent in configs written by older Vito versions.
+	// omitempty keeps the self-created default config file identical to previous versions.
+	Services []ServiceConfig `json:"services,omitempty"`
 }
 
 func GetConfig() *Config {
